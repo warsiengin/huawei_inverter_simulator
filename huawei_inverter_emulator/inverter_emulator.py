@@ -4,8 +4,7 @@
 Huawei SUN2000-330KTL-H1 PV inverter — Modbus/TCP simulator
 ============================================================
 
-Serves the register map from `huawei_modbus_registers_required.pdf`
-over Modbus TCP on 192.168.100.15:502, unit id 1.
+Implements `Huawei_Solar_Inverter_Modbus_Specification.pdf` over Modbus TCP.
 
 Based on nameplate specs:
   Model: SUN2000-330KTL-H1
@@ -68,6 +67,16 @@ R_ALARM1 = 32008
 R_ALARM2 = 32009
 R_ALARM3 = 32010
 
+R_PV1_VOLTAGE = 32016
+R_PV1_CURRENT = 32017
+R_PV2_VOLTAGE = 32018
+R_PV2_CURRENT = 32019
+R_PV3_VOLTAGE = 32020
+R_PV3_CURRENT = 32021
+R_PV4_VOLTAGE = 32022
+R_PV4_CURRENT = 32023
+
+R_INPUT_POWER = 32064        # I32 gain 1000  kW
 R_PEAK_POWER = 32078          # I32 gain 1000  kW
 R_ACTIVE_POWER = 32080        # I32 gain 1000  kW
 R_REACTIVE_POWER = 32082      # I32 gain 1000  kVar
@@ -91,17 +100,34 @@ R_FAST_SCHED = 45086          # U16, RW
 
 MAX_ADDR = 45086
 
-# Device status codes written to register 32089. The emulator currently emits
-# the standby, on-grid, power-limited, and command-shutdown states; the PDF
-# documents additional states that are reserved for future model extensions.
+# The supplied specification assigns write access only to these contiguous
+# ranges. The startup/shutdown commands are write-only; all other documented
+# signals are read-only except the system-time, grid-code, power-limit, and
+# fast-scheduling registers.
+WRITABLE_REGISTER_RANGES = (
+    (R_SYSTEM_TIME, R_SYSTEM_TIME + 1),
+    (R_CMD_STARTUP, R_CMD_SHUTDOWN),
+    (R_GRID_CODE, R_GRID_CODE),
+    (R_FAILSAFE_LIMIT, R_FAILSAFE_LIMIT + 1),
+    (R_FAST_SCHED, R_FAST_SCHED),
+)
+WRITE_FUNCTION_CODES = frozenset((6, 16, 22))
+SUPPORTED_REGISTER_FUNCTION_CODES = frozenset((3, 4, *WRITE_FUNCTION_CODES))
+SPEC_READ_ONLY_REGISTER_RANGES = (
+    (R_PV1_VOLTAGE, R_PV4_CURRENT),
+    (R_INPUT_POWER, R_INPUT_POWER + 1),
+    (R_PEAK_POWER, R_REACTIVE_POWER + 1),
+    (R_POWER_FACTOR, R_POWER_FACTOR),
+    (R_EFFICIENCY, R_SHUTDOWN_TIME + 1),
+    (R_TOTAL_YIELD, R_TOTAL_YIELD + 1),
+    (R_DAILY_YIELD, R_DAILY_YIELD + 1),
+)
+
+# Device-status values explicitly documented by the supplied specification.
 ST_STANDBY_INIT = 0x0000
-ST_STANDBY_IRRADIATION = 0x0002
-ST_STANDBY_GRID_DETECT = 0x0003
-ST_STARTING = 0x0100
+ST_STANDBY_INSULATION_CHECK = 0x0001
 ST_ON_GRID = 0x0200
-ST_ON_GRID_LIMITED = 0x0201
 ST_SHUTDOWN_FAULT = 0x0300
-ST_SHUTDOWN_COMMAND = 0x0301
 
 log = logging.getLogger("huawei-sim")
 
@@ -151,6 +177,7 @@ class InverterSim:
         self.peak_today_kw = 0.0
         self.startup_ts = 0
         self.shutdown_ts = 0
+        self.system_time_offset = 0.0
         self.forced_start = False
         self.forced_stop = False
         self.last_t = time.time()
@@ -196,6 +223,39 @@ class InverterSim:
     def wr_i32(self, addr: int, value: int) -> None:
         self.block.setValues(addr, _u32_words(value))
 
+    def on_modbus_write(self, address: int, values: list[int]) -> None:
+        """Apply a client write to the simulated system clock, if applicable.
+
+        Register 40000 is a 32-bit Unix timestamp. Converting a client write
+        into an offset preserves clock synchronization while subsequent
+        simulation updates continue refreshing the register.
+        """
+        end_address = address + len(values) - 1
+        if address <= R_SYSTEM_TIME + 1 and end_address >= R_SYSTEM_TIME:
+            self.system_time_offset = self.rd_u32(R_SYSTEM_TIME) - time.time()
+
+        if address <= R_FAILSAFE_LIMIT + 1 and end_address >= R_FAILSAFE_LIMIT:
+            raw_limit = self.rd_i32(R_FAILSAFE_LIMIT)
+            bounded_limit = min(max(raw_limit, 0), round(self.p_max * 1000))
+            if bounded_limit != raw_limit:
+                log.warning(
+                    "Clamping failsafe limit register 42405 from %d to %d",
+                    raw_limit,
+                    bounded_limit,
+                )
+                self.wr_i32(R_FAILSAFE_LIMIT, bounded_limit)
+
+        if address <= R_FAST_SCHED <= end_address:
+            fast_scheduling = self.rd_u16(R_FAST_SCHED)
+            if fast_scheduling not in (0, 1):
+                normalized_value = int(bool(fast_scheduling))
+                log.warning(
+                    "Normalizing fast-scheduling register 45086 from %d to %d",
+                    fast_scheduling,
+                    normalized_value,
+                )
+                self.wr_u16(R_FAST_SCHED, normalized_value)
+
     # ------------------------------------------------------------------ #
     #  One-time setup
     # ------------------------------------------------------------------ #
@@ -226,6 +286,14 @@ class InverterSim:
         self.wr_u32(R_STATE3, 0x0000)
         self.wr_u32(R_TOTAL_YIELD, int(self.total_energy_kwh * 100))
         self.wr_u32(R_DAILY_YIELD, 0)
+        self.wr_u32(R_INPUT_POWER, 0)
+        for address in (
+            R_PV1_VOLTAGE, R_PV1_CURRENT,
+            R_PV2_VOLTAGE, R_PV2_CURRENT,
+            R_PV3_VOLTAGE, R_PV3_CURRENT,
+            R_PV4_VOLTAGE, R_PV4_CURRENT,
+        ):
+            self.wr_i16(address, 0)
         self.wr_u32(R_STARTUP_TIME, 0)
         self.wr_u32(R_SHUTDOWN_TIME, 0)
         log.info("Register map initialised for %s (unit id %d)", MODEL_NAME, unit_id)
@@ -235,14 +303,15 @@ class InverterSim:
     # ------------------------------------------------------------------ #
     def update(self) -> None:
         """Advance one simulated second and publish a coherent register snapshot."""
-        now = time.time()
+        wall_time = time.time()
+        now = wall_time + self.system_time_offset
         # Bound elapsed time to avoid a long pause (or a delayed first tick)
         # creating an unrealistic single-step energy jump.
-        dt = min(max(now - self.last_t, 0.0), 10.0)
-        self.last_t = now
+        dt = min(max(wall_time - self.last_t, 0.0), 10.0)
+        self.last_t = wall_time
 
         # ---- day roll-over -------------------------------------------------
-        today = datetime.now().date()
+        today = datetime.fromtimestamp(now).date()
         if today != self.today:
             log.info("Day roll-over: daily yield reset (was %.2f kWh)",
                      self.daily_energy_kwh)
@@ -271,7 +340,7 @@ class InverterSim:
         # Approximate daylight with a half sine between 06:00 and 18:00 local
         # time. This is deliberately a simple deterministic daily envelope,
         # with bounded random cloud cover added below for changing output.
-        lt = datetime.now()
+        lt = datetime.fromtimestamp(now)
         hours = lt.hour + lt.minute / 60.0 + lt.second / 3600.0
         if 6.0 <= hours <= 18.0:
             sun = math.sin(math.pi * (hours - 6.0) / 12.0)
@@ -339,6 +408,18 @@ class InverterSim:
         else:
             eff_pct = 0.0
 
+        # Reconstruct DC input power from AC output and conversion efficiency,
+        # then divide it evenly over the four DC inputs named in the PDF. The
+        # synthetic MPP voltage follows the simulated irradiance within the
+        # model's 500-1500 V operating range.
+        dc_input_kw = p_ac / (eff_pct / 100.0) if eff_pct > 0 else 0.0
+        pv_voltage_v = 500.0 + 1000.0 * dc if dc_input_kw > 0 else 0.0
+        pv_current_a = (
+            dc_input_kw * 1000.0 / (4.0 * pv_voltage_v)
+            if pv_voltage_v > 0
+            else 0.0
+        )
+
         # ---- thermal -------------------------------------------------------
         # Ambient range: -25 to +60 C. Cabinet internal is higher under load.
         # Move partway toward a load-dependent target per tick and add small
@@ -357,22 +438,18 @@ class InverterSim:
         # ---- device status -------------------------------------------------
         # Report command shutdown distinctly from normal standby. A low-power
         # cutoff (0.5 kW) keeps status changes from chattering near zero.
-        if self.forced_stop:
-            status = ST_SHUTDOWN_COMMAND
-        elif p_ac > 0.5:
-            status = ST_ON_GRID_LIMITED if limited else ST_ON_GRID
-        elif sun > 0.02:
-            status = ST_STANDBY_GRID_DETECT
-        elif sun > 0:
-            status = ST_STANDBY_IRRADIATION
+        if p_ac > 0.5:
+            status = ST_ON_GRID
+        elif sun > 0.02 or self.forced_stop:
+            status = ST_STANDBY_INSULATION_CHECK
         else:
             status = ST_STANDBY_INIT
 
         # ---- startup / shutdown timestamps ---------------------------------
         # Timestamps change only on transitions into or out of an on-grid
         # state, and are Unix epoch seconds as specified by the PDF.
-        running = status in (ST_ON_GRID, ST_ON_GRID_LIMITED)
-        was_running = self.last_status in (ST_ON_GRID, ST_ON_GRID_LIMITED)
+        running = status == ST_ON_GRID
+        was_running = self.last_status == ST_ON_GRID
         if running and not was_running:
             self.startup_ts = int(now)
             log.info("Inverter transitioned to ON-GRID")
@@ -396,8 +473,6 @@ class InverterSim:
             state1 = 0x0006                      # bit1 grid-connected, bit2 normal
             if limited:
                 state1 |= 0x0008                 # bit3 derating (power rationing)
-        elif status == ST_SHUTDOWN_COMMAND:
-            state1 = 0x0040                      # bit6 stop due to command
         else:
             state1 = 0x0001                      # bit0 standby
 
@@ -410,6 +485,15 @@ class InverterSim:
         self.wr_i32(R_ACTIVE_POWER, int(round(p_ac * 1000)))
         self.wr_i32(R_REACTIVE_POWER, int(round(q_ac * 1000)))
         self.wr_i32(R_PEAK_POWER, int(round(self.peak_today_kw * 1000)))
+        self.wr_i32(R_INPUT_POWER, int(round(dc_input_kw * 1000)))
+        for voltage_register, current_register in (
+            (R_PV1_VOLTAGE, R_PV1_CURRENT),
+            (R_PV2_VOLTAGE, R_PV2_CURRENT),
+            (R_PV3_VOLTAGE, R_PV3_CURRENT),
+            (R_PV4_VOLTAGE, R_PV4_CURRENT),
+        ):
+            self.wr_i16(voltage_register, int(round(pv_voltage_v * 10)))
+            self.wr_i16(current_register, int(round(pv_current_a * 100)))
         self.wr_i16(R_POWER_FACTOR, int(round(pf * 1000)))
         self.wr_u16(R_EFFICIENCY, int(round(eff_pct * 100)))
         self.wr_i16(R_INTERNAL_TEMP, int(round(self.temp_c * 10)))
@@ -463,6 +547,50 @@ class InverterSim:
 # --------------------------------------------------------------------------- #
 #  Server plumbing
 # --------------------------------------------------------------------------- #
+class InverterRegisterContext(ModbusSlaveContext):
+    """Holding-register context that enforces the specification's access modes."""
+
+    def __init__(self, *args, **kwargs):
+        self.write_callback = None
+        super().__init__(*args, **kwargs)
+
+    def validate(self, fc_as_hex, address, count=1):
+        """Reject writes outside RW/WO regions and reads from WO command words."""
+        if fc_as_hex not in SUPPORTED_REGISTER_FUNCTION_CODES:
+            return False
+        if not super().validate(fc_as_hex, address, count):
+            return False
+
+        start = address if self.zero_mode else address + 1
+        end = start + count - 1
+
+        if fc_as_hex in WRITE_FUNCTION_CODES:
+            return any(
+                allowed_start <= start and end <= allowed_end
+                for allowed_start, allowed_end in WRITABLE_REGISTER_RANGES
+            )
+
+        if fc_as_hex == 4:
+            return any(
+                allowed_start <= start and end <= allowed_end
+                for allowed_start, allowed_end in SPEC_READ_ONLY_REGISTER_RANGES
+            )
+
+        if fc_as_hex == 3:
+            # FC 03 remains available for clients that read the entire map as
+            # holding registers, but WO command words cannot be read.
+            return not (start <= R_CMD_SHUTDOWN and end >= R_CMD_STARTUP)
+
+        return True
+
+    def setValues(self, fc_as_hex, address, values):
+        """Forward validated protocol writes and notify the model of clock sync."""
+        super().setValues(fc_as_hex, address, values)
+        if fc_as_hex in WRITE_FUNCTION_CODES and self.write_callback is not None:
+            adjusted_address = address if self.zero_mode else address + 1
+            self.write_callback(adjusted_address, values)
+
+
 def build_context(unit_id: int):
     """Build an address-zero-based holding-register map for one Modbus unit.
 
@@ -473,11 +601,11 @@ def build_context(unit_id: int):
     """
     block = ModbusSequentialDataBlock(0, [0] * (MAX_ADDR + 2))
     try:
-        store = ModbusSlaveContext(hr=block, zero_mode=True)
+        store = InverterRegisterContext(hr=block, ir=block, zero_mode=True)
     except TypeError:
-        log.warning("ModbusSlaveContext(zero_mode=...) unsupported; "
+        log.warning("zero_mode addressing is unsupported; "
                     "falling back to default addressing")
-        store = ModbusSlaveContext(hr=block)
+        store = InverterRegisterContext(hr=block, ir=block)
 
     try:
         context = ModbusServerContext(devices={unit_id: store}, single=False)
@@ -498,6 +626,7 @@ async def amain(args) -> None:
     """Initialize the model and run its background tasks beside the TCP server."""
     context, block = build_context(args.unit)
     sim = InverterSim(block)
+    context[args.unit].write_callback = sim.on_modbus_write
     sim.initialise(
         unit_id=args.unit,
         grid_code=args.grid_code,

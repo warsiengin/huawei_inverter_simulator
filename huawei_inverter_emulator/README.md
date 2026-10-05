@@ -5,10 +5,10 @@ Modbus TCP server. It is a software test device for integrations and
 demonstrations—not a bridge to a physical inverter or a safety-certified
 emulation of Huawei firmware.
 
-The [repository README](../README.md) documents every implemented register,
+The [repository README](../README.md) documents every specified register,
 the fixed-point gains, modeled status values, simulator behavior, and known
 limitations. The original reference is
-[`huawei_modbus_registers_required.pdf`](../huawei_modbus_registers_required.pdf).
+[`Huawei_Solar_Inverter_Modbus_Specification.pdf`](../Huawei_Solar_Inverter_Modbus_Specification.pdf).
 
 ## Install
 
@@ -48,21 +48,37 @@ Modbus clients may update these registers while it is running; runtime changes
 are held in memory and replaced by the configured initial values after a
 restart. System time (`40000`) is initialized and refreshed automatically
 from the system clock; it is not a user-supplied option.
+A client write to `40000` synchronizes the simulator clock offset, which also
+affects its timestamps and daylight cycle.
+Because this is a 32-bit value, clients should write both registers together
+with one multiple-register request (FC 16).
+
+The failsafe power limit is clamped to 0–275 kW when a client writes a value
+outside that model range. Fast scheduling accepts only its specified `0`
+(disabled) and `1` (enabled) states; other nonzero values are normalized to
+`1`. The example grid-code IDs documented by the reference include `0`
+(Germany), `1` (China), `2` (France), `13` (Italy), and `19` (Australia).
+Grid codes are retained but do not modify the simplified electrical model.
 
 The emulator provides holding-register data at the exact addresses defined in
 the PDF. Many clients use a zero-based address offset internally; configure
 the client's address convention so it sends the register address shown in the
-PDF. Multi-register 32-bit values are high-word-first.
+PDF. Read-only telemetry is available through both holding-register and
+input-register read functions. Multi-register 32-bit values are high-word-first.
 
-The PDF's read-only labels describe the intended client interface. The
-current holding-register datastore does not enforce read-only permissions
-per address, so avoid writing to telemetry/status registers; model-owned
-values are republished on the next update.
+The server exposes the specified RO telemetry through holding registers
+(FC 03) and input registers (FC 04). Its datastore enforces RO/RW/WO access:
+RO writes and reads of WO startup/shutdown registers are rejected with
+`Illegal Address`. Writable addresses accept FC 06, FC 16, and FC 22; FC 23
+(combined read/write multiple registers) is rejected because it does not
+permit separate validation of its read and write ranges.
 
 ## What is simulated
 
 - AC active and reactive power, daily peak, power factor, conversion
   efficiency, temperature, and insulation resistance.
+- Total DC input power and modeled voltage/current readings for all four PV
+  strings listed in the specification.
 - Device and state bitfields, startup/shutdown epoch timestamps, daily and
   lifetime energy yields.
 - Writable grid code, failsafe power limit, system-time, and fast-scheduling
@@ -71,8 +87,10 @@ values are republished on the next update.
 
 The power model uses a local-time 06:00–18:00 half-sine solar envelope and a
 randomized cloud factor. It is a demonstration model, not a weather forecast.
-Alarm registers and fault code remain clear; fast scheduling is stored but
-does not affect the model. Energy values, commands, and operating state are
+Input power is inferred from AC power and efficiency; the input measurements
+are shared evenly among the four simulated PV strings. Alarm registers and
+fault code remain clear; fast scheduling is stored but does not affect the
+model. Energy values, commands, and operating state are
 held in process memory and reset when the add-on restarts. No Home Assistant
 entities or persistent history are created.
 

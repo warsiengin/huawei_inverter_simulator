@@ -8,8 +8,8 @@ firmware and safety behavior of a physical inverter.
 
 The source of truth for register addresses, data types, gains, status values,
 and documented controls is
-[`huawei_modbus_registers_required.pdf`](./huawei_modbus_registers_required.pdf).
-The Python simulator implements the modeled subset described below.
+[`Huawei_Solar_Inverter_Modbus_Specification.pdf`](./Huawei_Solar_Inverter_Modbus_Specification.pdf).
+The Python simulator implements every register listed in that specification.
 
 ## Home Assistant add-on
 
@@ -56,6 +56,9 @@ registers, troubleshooting, and developer build instructions.
 The root-level `inverter_emulator.py` is a compatibility entry point; it
 imports and starts the packaged implementation in
 [`huawei_inverter_emulator/inverter_emulator.py`](./huawei_inverter_emulator/inverter_emulator.py).
+The legacy [`huawei_modbus_sim.py`](./huawei_modbus_sim.py) command is also
+retained as a compatibility launcher and now runs this same specification-based
+implementation instead of its former, separate 5 kW prototype.
 
 Install the supported pymodbus range and run the simulator:
 
@@ -95,10 +98,19 @@ address adjustment unless that client explicitly requires it.
 
 | Address | Signal | Type | Gain | Access | Simulator behavior |
 | ---: | --- | --- | ---: | --- | --- |
-| `32000` | State 1 | Bitfield 16 | 1 | Read-only | Standby, grid-connected, normal, derating, or command-stop flags. |
-| `32002` | State 2 | Bitfield 16 | 1 | Read-only | Reports unlocked, PV-connected, and DSP-ready flags. |
-| `32003` | State 3 | Bitfield 32 | 1 | Read-only | Reports on-grid mode; off-grid switch remains disabled. |
-| `32008`–`32010` | Alarm 1–3 | Bitfield 16 | 1 | Read-only | Initialized and published as zero; alarms are not synthesized. |
+| `32000` | State 1 | Bitfield 16 | 1 | Read-only | Legacy supplementary status flags; not part of the new specification. |
+| `32002` | State 2 | Bitfield 16 | 1 | Read-only | Legacy supplementary connection/processor flags; not part of the new specification. |
+| `32003` | State 3 | Bitfield 32 | 1 | Read-only | Legacy supplementary grid-mode flag; not part of the new specification. |
+| `32008`–`32010` | Alarm 1–3 | Bitfield 16 | 1 | Read-only | Legacy supplementary alarm bitfields; remain zero. |
+| `32016` | PV1 voltage | I16 | 10 | Read-only | Modeled DC input voltage in V. |
+| `32017` | PV1 current | I16 | 100 | Read-only | Modeled DC input current in A. |
+| `32018` | PV2 voltage | I16 | 10 | Read-only | Modeled DC input voltage in V. |
+| `32019` | PV2 current | I16 | 100 | Read-only | Modeled DC input current in A. |
+| `32020` | PV3 voltage | I16 | 10 | Read-only | Modeled DC input voltage in V. |
+| `32021` | PV3 current | I16 | 100 | Read-only | Modeled DC input current in A. |
+| `32022` | PV4 voltage | I16 | 10 | Read-only | Modeled DC input voltage in V. |
+| `32023` | PV4 current | I16 | 100 | Read-only | Modeled DC input current in A. |
+| `32064` | Input power | I32 | 1000 | Read-only | Total modeled DC input power, estimated from AC output and efficiency, in kW. |
 | `32078` | Peak active power of current day | I32 | 1000 | Read-only | Maximum modeled AC active power today, in kW. |
 | `32080` | Active power | I32 | 1000 | Read-only | Modeled AC active power, in kW. |
 | `32082` | Reactive power | I32 | 1000 | Read-only | Modeled reactive power, in kVar. |
@@ -106,7 +118,7 @@ address adjustment unless that client explicitly requires it.
 | `32086` | Efficiency | U16 | 100 | Read-only | Modeled conversion efficiency, in percent. |
 | `32087` | Internal temperature | I16 | 10 | Read-only | Synthetic cabinet temperature, in °C. |
 | `32088` | Insulation resistance | U16 | 1000 | Read-only | Synthetic insulation resistance, in MΩ. |
-| `32089` | Device status | U16 | 1 | Read-only | Standby, on-grid, power-limited, or command-shutdown enum. |
+| `32089` | Device status | U16 | 1 | Read-only | Uses the status values documented in the specification. |
 | `32090` | Fault code | U16 | 1 | Read-only | Zero; fault conditions are not simulated. |
 | `32091` | Startup time | U32 | 1 | Read-only | Epoch seconds for the most recent transition to on-grid. |
 | `32093` | Shutdown time | U32 | 1 | Read-only | Epoch seconds for the most recent transition out of on-grid. |
@@ -115,23 +127,39 @@ address adjustment unless that client explicitly requires it.
 | `40000` | System time | U32 | 1 | Read/write | Unix epoch seconds; refreshed from the simulator's system clock. |
 | `40200` | Startup | U16 | 1 | Write command | Writing `1` requests forced startup; the command is cleared after processing. |
 | `40201` | Shutdown | U16 | 1 | Write command | Writing `1` requests forced shutdown; the command is cleared after processing. |
-| `42000` | Grid code | U16 | 1 | Read/write | Initialized to `0` (VDE-AR-N-4105); other codes are not interpreted. |
+| `42000` | Grid code | U16 | 1 | Read/write | Initialized to `0` (VDE-AR-N-4105). The reference also lists `1` (NB/T 32004, China), `2` (UTE, France), `13` (CEI0-21, Italy), and `19` (AS4777, Australia); grid behavior is not interpreted. |
 | `42405` | Failsafe active power limit | I32 | 1000 | Read/write | AC output limit in kW; initialized to the 275 kW model maximum and clamped to 0–275 kW when applied. |
 | `45086` | Fast power scheduling | U16 | 1 | Read/write | Initialized to `0`; retained as a setting but not used by the power model. |
 
-The status enumeration and alarm bit definitions are reproduced in the supplied
-PDF. Although the simulator publishes the specified alarm registers, it does
-not generate faults or alarms. The device-status values it currently models
-are standby initialization (`0x0000`), standby irradiation (`0x0002`), standby
-grid detection (`0x0003`), on-grid (`0x0200`), on-grid limited (`0x0201`), and
-shutdown by command (`0x0301`).
+The supplied specification defines device statuses `0x0000` (standby:
+initializing), `0x0001` (standby: insulation check), `0x0200` (on-grid), and
+`0x0300` (shutdown: fault). The simulator emits the first three; it does not
+synthesize a fault, so `0x0300` is reserved. A remote shutdown command places
+the model in standby/insulation-check (`0x0001`) without reporting a false
+fault. Alarm registers remain zero because fault conditions are not modeled.
 
-The table's access column describes the intended access from the PDF, but the
-current pymodbus holding-register datastore does not enforce a separate
-read-only permission for each address. Do not write to telemetry/status
-registers: the simulation republishes its model-owned values on each update.
-Likewise, writes to grid code and fast scheduling are retained as register
-values but do not change the simulated grid behavior.
+The server supports the specified read-only telemetry through both holding
+registers (FC 03) and input registers (FC 04). Access modes are enforced:
+writes to RO and unmapped holding-register addresses and reads from WO startup
+and shutdown command addresses are rejected with Modbus exception
+`Illegal Address`. Writable settings and control commands accept single
+register (FC 06), multiple register (FC 16), and mask-write (FC 22) requests.
+The combined read/write-multiple-registers function (FC 23) is rejected
+because it cannot be validated as separate read and write ranges under the
+access policy.
+
+Input power is calculated from modeled AC output and efficiency. Its value is
+distributed evenly across the four PV input channels; each channel's voltage
+tracks the simulated irradiance within the 500–1500 V range. This balances the
+published per-string telemetry with the aggregate DC power but is not intended
+to represent independent string mismatch or optimizer behavior.
+
+System-time writes update the emulator's clock offset; the register continues
+to advance on each simulation update, and model timestamps and daylight
+simulation follow the synchronized time. The failsafe limit affects active
+power and is clamped to the model range of 0–275 kW. Fast scheduling is
+normalized to its specified values of 0 (disabled) or 1 (enabled). Grid code
+values are stored but are not interpreted by the simplified grid model.
 
 ### Simulator behavior and limitations
 
@@ -143,6 +171,8 @@ values but do not change the simulated grid behavior.
 - Reactive power, power factor, efficiency, temperature, and insulation
   readings are generated as plausible synthetic telemetry, not electrical or
   thermal measurements.
+- DC input power and the four PV channel measurements are derived from the
+  modeled AC output and efficiency, and are distributed evenly across strings.
 - Writing `1` to startup or shutdown is a one-shot command. Startup forces a
   minimum irradiance floor; shutdown forces power to zero until startup is
   requested. A shutdown command takes precedence over the solar model.
