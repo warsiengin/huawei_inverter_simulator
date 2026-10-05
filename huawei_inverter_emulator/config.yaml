@@ -14,10 +14,18 @@ init: false
 ports:
   502/tcp: 502
 ports_description:
-  502/tcp: Modbus TCP listener (change the host port in the add-on network settings if needed).
+  502/tcp: Modbus TCP service. Configure the published host port in Network settings.
 options:
+  client_ip: ""
   unit_id: 1
+  grid_code: 0
+  failsafe_limit_kw: 275.0
+  fast_scheduling: false
   quiet: false
 schema:
+  client_ip: str
   unit_id: int(1,247)
+  grid_code: int(0,65535)
+  failsafe_limit_kw: float(0,275)
+  fast_scheduling: bool
   quiet: bool

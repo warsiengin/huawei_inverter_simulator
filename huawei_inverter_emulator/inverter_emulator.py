@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import logging
 import math
 import random
@@ -198,11 +199,23 @@ class InverterSim:
     # ------------------------------------------------------------------ #
     #  One-time setup
     # ------------------------------------------------------------------ #
-    def initialise(self) -> None:
-        """Populate writable settings and a safe, fault-free standby snapshot."""
-        self.wr_u16(R_GRID_CODE, 0)                       # 0 = VDE-AR-N-4105
-        self.wr_u16(R_FAST_SCHED, 0)
-        self.wr_i32(R_FAILSAFE_LIMIT, int(self.p_max * 1000))
+    def initialise(
+        self,
+        unit_id: int = DEFAULT_UNIT,
+        grid_code: int = 0,
+        failsafe_limit_kw: float = 275.0,
+        fast_scheduling: bool = False,
+    ) -> None:
+        """Populate configured writable settings and a fault-free standby snapshot.
+
+        ``failsafe_limit_kw`` is accepted in engineering units and converted to
+        the PDF's signed kW * 1000 register representation. The limit is
+        clamped to the simulator's rated active-power range.
+        """
+        failsafe_limit_kw = min(max(failsafe_limit_kw, 0.0), self.p_max)
+        self.wr_u16(R_GRID_CODE, grid_code)
+        self.wr_u16(R_FAST_SCHED, int(fast_scheduling))
+        self.wr_i32(R_FAILSAFE_LIMIT, round(failsafe_limit_kw * 1000))
         self.wr_u32(R_SYSTEM_TIME, int(time.time()))
         self.wr_u16(R_FAULT_CODE, 0)
         for reg in (R_ALARM1, R_ALARM2, R_ALARM3,
@@ -215,7 +228,7 @@ class InverterSim:
         self.wr_u32(R_DAILY_YIELD, 0)
         self.wr_u32(R_STARTUP_TIME, 0)
         self.wr_u32(R_SHUTDOWN_TIME, 0)
-        log.info("Register map initialised for %s (unit id %d)", MODEL_NAME, args.unit)
+        log.info("Register map initialised for %s (unit id %d)", MODEL_NAME, unit_id)
 
     # ------------------------------------------------------------------ #
     #  Main simulation step
@@ -485,10 +498,29 @@ async def amain(args) -> None:
     """Initialize the model and run its background tasks beside the TCP server."""
     context, block = build_context(args.unit)
     sim = InverterSim(block)
-    sim.initialise()
+    sim.initialise(
+        unit_id=args.unit,
+        grid_code=args.grid_code,
+        failsafe_limit_kw=args.failsafe_limit_kw,
+        fast_scheduling=args.fast_scheduling,
+    )
 
     log.info("Starting %s simulator on %s:%d (unit id %d)",
              MODEL_NAME, args.host, args.port, args.unit)
+    if args.advertised_ip:
+        address = f"[{args.advertised_ip}]" if args.advertised_ip.version == 6 \
+            else str(args.advertised_ip)
+        log.info("Client connection address: %s:%d", address, args.port)
+    log.info(
+        "Initial writable registers: 40000 system_time=%d; "
+        "42000 grid_code=%d; 42405 power_limit=%.3f kW (raw=%d); "
+        "45086 fast_scheduling=%d",
+        sim.rd_u32(R_SYSTEM_TIME),
+        sim.rd_u16(R_GRID_CODE),
+        sim.rd_i32(R_FAILSAFE_LIMIT) / 1000.0,
+        sim.rd_i32(R_FAILSAFE_LIMIT),
+        sim.rd_u16(R_FAST_SCHED),
+    )
 
     asyncio.create_task(sim.run())
     if not args.quiet:
@@ -509,6 +541,14 @@ def main() -> None:
                    help=f"TCP port (default {DEFAULT_PORT})")
     p.add_argument("--unit", type=int, default=DEFAULT_UNIT,
                    help=f"Modbus unit/slave id (default {DEFAULT_UNIT})")
+    p.add_argument("--advertised-ip", type=ipaddress.ip_address, default="",
+                   help="optional client-facing host IP to include in startup logs")
+    p.add_argument("--grid-code", type=int, default=0,
+                   help="initial grid code for holding register 42000 (default 0)")
+    p.add_argument("--failsafe-limit-kw", type=float, default=275.0,
+                   help="initial active power limit in kW for register 42405")
+    p.add_argument("--fast-scheduling", action="store_true",
+                   help="enable register 45086 at startup")
     p.add_argument("--quiet", action="store_true",
                    help="disable the periodic telemetry log line")
     p.add_argument("-v", "--verbose", action="store_true",

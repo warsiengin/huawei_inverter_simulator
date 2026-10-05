@@ -28,15 +28,25 @@ same emulator used by the command-line entry point.
 The add-on listens on **TCP port 502** and publishes that port to the Home
 Assistant host. In the add-on's **Network** settings, change the host-side
 port if another service already uses 502. Use the Home Assistant host's LAN
-address and configured port in your Modbus client; the container binds to
-`0.0.0.0`, not to an address that only exists on the host.
+address and configured port in your Modbus client. Set `client_ip` if you want
+the host address included in the add-on's startup log. This field does not
+change the container bind address, which remains `0.0.0.0`.
+
+The add-on startup log also lists the initial raw values and engineering
+units for writable registers `40000`, `42000`, `42405`, and `45086`. Grid code,
+failsafe limit, and fast-scheduling values are initialized from the add-on
+options; system time is maintained automatically from the host clock.
 
 ### Add-on options
 
 | Option | Default | Description |
 | --- | ---: | --- |
+| `client_ip` | Empty | Optional Home Assistant host IP address displayed in the add-on startup log; informational only. |
 | `unit_id` | `1` | Modbus unit identifier. Valid range: 1–247. |
-| `quiet` | `false` | Suppresses the periodic telemetry summary in the add-on log. Startup and error logs remain available. |
+| `grid_code` | `0` | Initial value for writable register `42000`; currently not interpreted by the model. |
+| `failsafe_limit_kw` | `275` | Initial value for writable register `42405`, in kW; valid range 0–275. |
+| `fast_scheduling` | `false` | Initial value for writable register `45086`; retained but not used by the power model. |
+| `quiet` | `false` | Suppresses periodic telemetry summaries. Startup and error messages remain available. |
 
 See the [add-on guide](./huawei_inverter_emulator/README.md) for configuration,
 registers, troubleshooting, and developer build instructions.
