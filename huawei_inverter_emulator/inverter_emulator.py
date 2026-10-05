@@ -728,7 +728,7 @@ def main() -> None:
                    help=f"TCP port (default {DEFAULT_PORT})")
     p.add_argument("--unit", type=int, default=DEFAULT_UNIT,
                    help=f"Modbus unit/slave id (default {DEFAULT_UNIT})")
-    p.add_argument("--advertised-ip", type=ipaddress.ip_address, default="",
+    p.add_argument("--advertised-ip", type=ipaddress.ip_address, default=None,
                    help="optional client-facing host IP to include in startup logs")
     p.add_argument("--grid-code", type=int, default=0,
                    help="initial grid code for holding register 42000 (default 0)")
