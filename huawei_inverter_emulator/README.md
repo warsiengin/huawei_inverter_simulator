@@ -79,6 +79,10 @@ permit separate validation of its read and write ranges.
   efficiency, temperature, and insulation resistance.
 - Total DC input power and modeled voltage/current readings for all four PV
   strings listed in the specification.
+- Active/apparent power, output current, MPP voltage, and PV-channel current
+  are constrained by nameplate ratings. The synthetic PF and reactive power
+  exercise leading and lagging operation; positive values indicate lagging
+  and negative values indicate leading.
 - Device and state bitfields, startup/shutdown epoch timestamps, daily and
   lifetime energy yields.
 - Writable grid code, failsafe power limit, system-time, and fast-scheduling
@@ -94,6 +98,17 @@ model. Energy values, commands, and operating state are
 held in process memory and reset when the add-on restarts. No Home Assistant
 entities or persistent history are created.
 
+The nameplate describes six physical DC inputs, but the supplied Modbus PDF
+defines only four PV voltage/current channels; only those four are published.
+Nameplate ratings without PDF register addresses—including 800 V AC output,
+50/60 Hz, ambient temperature, and output current—are not invented as
+register telemetry. Output current is derived from apparent power at 800 V in
+log summaries. The −25 to +60 °C value is the nameplate ambient operating
+range, not a bound for the PDF's internal-temperature measurement. Short-
+circuit current, enclosure, topology, pollution degree, protection class, and
+MBUS/RS485 communication ratings are documented characteristics only; the
+software does not emulate those physical properties or protections.
+
 Refer to the [register table and behavior notes](../README.md#register-map) for
 all addresses, data types, gains, read/write permissions, status values, and
 limitations.
@@ -101,7 +116,8 @@ limitations.
 ## Logs and troubleshooting
 
 Open the add-on's **Log** tab to review startup status and periodic telemetry.
-Each summary reports active, reactive, and apparent power; power factor;
+Each summary reports active, reactive, and apparent power; derived AC output
+current at 800 V; power factor (positive lagging, negative leading);
 efficiency; temperature; insulation resistance; device status; and daily
 yield. Set `quiet: true` to suppress periodic summaries while retaining
 lifecycle and error messages.

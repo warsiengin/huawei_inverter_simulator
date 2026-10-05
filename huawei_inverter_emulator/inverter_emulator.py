@@ -54,6 +54,21 @@ DEFAULT_UNIT = 1
 
 MODEL_NAME = "SUN2000-330KTL-H1"
 
+# Nameplate ratings are model constraints and documentation values, not all
+# independent Modbus signals. The PDF exposes only four PV input channels and
+# does not assign registers to AC voltage, output current, or grid frequency.
+MAX_DC_INPUT_VOLTAGE_V = 1500.0
+MPP_VOLTAGE_MIN_V = 500.0
+MPP_VOLTAGE_MAX_V = 1500.0
+MAX_DC_INPUT_CURRENT_A = 65.0
+PHYSICAL_DC_INPUT_COUNT = 6
+PDF_PV_CHANNEL_COUNT = 4
+NOMINAL_AC_VOLTAGE_V = 800.0
+MAX_OUTPUT_CURRENT_A = 238.2
+NOMINAL_FREQUENCIES_HZ = (50, 60)
+AMBIENT_OPERATING_TEMP_MIN_C = -25.0
+AMBIENT_OPERATING_TEMP_MAX_C = 60.0
+
 # --------------------------------------------------------------------------- #
 #  Register addresses
 # --------------------------------------------------------------------------- #
@@ -378,23 +393,29 @@ class InverterSim:
         p_ac = min(p_ac, limit_kw)
 
         # ---- Reactive power / Power Factor --------------------------------
-        # Nameplate: 0.8 lagging to 0.8 leading, but we operate near 1.0
-        # for a realistic high-efficiency scenario unless heavily loaded.
-        # Limit Q so that Apparent Power (S) <= 330 kVA
-        # The sign convention is intentionally non-directional here: this
-        # example model produces non-negative reactive power rather than
-        # modeling leading/lagging setpoints.
+        # Sample both nameplate operating modes. Positive PF/Q denotes
+        # lagging; negative PF/Q denotes leading. The 330 kVA ceiling and the
+        # 238.2 A current rating are both applied at the 800 V three-phase
+        # nameplate voltage, so the stricter effective S limit always wins.
         if p_ac > 0.5:
-            pf = random.uniform(0.995, 1.0)
-            q_ac = p_ac * math.tan(math.acos(pf))
-            
-            # Enforce S_max = 330 kVA
-            max_q = math.sqrt(max(0, self.s_max**2 - p_ac**2))
-            q_ac = min(q_ac, max_q)
-            
-            # Recalculate actual PF based on capped Q
+            pf_magnitude = random.uniform(0.8, 1.0)
+            q_magnitude = p_ac * math.tan(math.acos(pf_magnitude))
+            current_limited_s = (
+                math.sqrt(3)
+                * NOMINAL_AC_VOLTAGE_V
+                * MAX_OUTPUT_CURRENT_A
+                / 1000.0
+            )
+            s_limit = min(self.s_max, current_limited_s)
+            max_q = math.sqrt(max(0.0, s_limit**2 - p_ac**2))
+            q_ac = min(q_magnitude, max_q) * random.choice((-1, 1))
+
             s_actual = math.hypot(p_ac, q_ac)
-            pf = p_ac / s_actual if s_actual > 0 else 1.0
+            pf = (
+                math.copysign(p_ac / s_actual, q_ac)
+                if s_actual > 0 and q_ac != 0
+                else 1.0
+            )
         else:
             pf = 1.0
             q_ac = 0.0
@@ -409,22 +430,28 @@ class InverterSim:
             eff_pct = 0.0
 
         # Reconstruct DC input power from AC output and conversion efficiency,
-        # then divide it evenly over the four DC inputs named in the PDF. The
-        # synthetic MPP voltage follows the simulated irradiance within the
-        # model's 500-1500 V operating range.
+        # then divide it evenly over the four PV channels named in the PDF.
+        # The nameplate describes six physical inputs; the extra two have no
+        # registers in the supplied map and are not fabricated here.
         dc_input_kw = p_ac / (eff_pct / 100.0) if eff_pct > 0 else 0.0
-        pv_voltage_v = 500.0 + 1000.0 * dc if dc_input_kw > 0 else 0.0
+        pv_voltage_v = (
+            MPP_VOLTAGE_MIN_V
+            + (MPP_VOLTAGE_MAX_V - MPP_VOLTAGE_MIN_V) * dc
+            if dc_input_kw > 0
+            else 0.0
+        )
         pv_current_a = (
-            dc_input_kw * 1000.0 / (4.0 * pv_voltage_v)
+            dc_input_kw * 1000.0 / (PDF_PV_CHANNEL_COUNT * pv_voltage_v)
             if pv_voltage_v > 0
             else 0.0
         )
 
         # ---- thermal -------------------------------------------------------
-        # Ambient range: -25 to +60 C. Cabinet internal is higher under load.
-        # Move partway toward a load-dependent target per tick and add small
-        # sensor noise; this is a first-order approximation, not a thermal CFD
-        # or ambient-weather model.
+        # The PDF's temperature register is an internal-temperature reading;
+        # the nameplate's -25 to +60 C range is ambient operating temperature
+        # and is not a limit for that internal sensor. This load-dependent
+        # synthetic reading is a first-order model, not
+        # an ambient-weather or thermal-safety simulation.
         target_temp = 25.0 + 35.0 * (p_ac / self.p_max) if p_ac > 0.5 else 22.0
         self.temp_c += (target_temp - self.temp_c) * 0.05
         self.temp_c += random.uniform(-0.15, 0.15)
@@ -526,15 +553,23 @@ class InverterSim:
     # ------------------------------------------------------------------ #
     def dump(self) -> str:
         """Format a concise engineering-unit snapshot for the add-on log."""
+        p_kw = self.rd_i32(R_ACTIVE_POWER) / 1000.0
+        q_kvar = self.rd_i32(R_REACTIVE_POWER) / 1000.0
         s_kva = math.hypot(
-            self.rd_i32(R_ACTIVE_POWER) / 1000.0,
-            self.rd_i32(R_REACTIVE_POWER) / 1000.0
+            p_kw,
+            q_kvar,
+        )
+        output_current_a = (
+            s_kva * 1000.0
+            / (math.sqrt(3) * NOMINAL_AC_VOLTAGE_V)
         )
         return (
             f"[{MODEL_NAME}] "
-            f"P={self.rd_i32(R_ACTIVE_POWER)/1000:7.2f} kW  "
-            f"Q={self.rd_i32(R_REACTIVE_POWER)/1000:7.2f} kVar  "
+            f"P={p_kw:7.2f} kW  "
+            f"Q={q_kvar:7.2f} kVar  "
             f"S={s_kva:7.2f} kVA  "
+            f"Iac={output_current_a:6.2f} A @ "
+            f"{NOMINAL_AC_VOLTAGE_V:.0f} V  "
             f"PF={self.rd_i16(R_POWER_FACTOR)/1000:5.3f}  "
             f"eff={self.rd_u16(R_EFFICIENCY)/100:5.2f}%  "
             f"T={self.rd_i16(R_INTERNAL_TEMP)/10:5.1f}C  "
@@ -636,6 +671,29 @@ async def amain(args) -> None:
 
     log.info("Starting %s simulator on %s:%d (unit id %d)",
              MODEL_NAME, args.host, args.port, args.unit)
+    log.info(
+        "Nameplate ratings: DC max %.0f V; MPP %.0f-%.0f V; "
+        "%d physical inputs at %.0f A max (%.0f A short-circuit each; "
+        "%d PV channels in the supplied register map); "
+        "%.0f V three-phase AC, %d/%d Hz; %.0f kW, %.0f kVA, %.1f A max; "
+        "PF 0.8 leading to 0.8 lagging; ambient %.0f to %.0f C; "
+        "non-isolated, IP66, class I, pollution degree III; "
+        "nameplate communications MBUS/RS485 (emulated transport: Modbus TCP)",
+        MAX_DC_INPUT_VOLTAGE_V,
+        MPP_VOLTAGE_MIN_V,
+        MPP_VOLTAGE_MAX_V,
+        PHYSICAL_DC_INPUT_COUNT,
+        MAX_DC_INPUT_CURRENT_A,
+        115.0,
+        PDF_PV_CHANNEL_COUNT,
+        NOMINAL_AC_VOLTAGE_V,
+        *NOMINAL_FREQUENCIES_HZ,
+        sim.p_rated,
+        sim.s_max,
+        MAX_OUTPUT_CURRENT_A,
+        AMBIENT_OPERATING_TEMP_MIN_C,
+        AMBIENT_OPERATING_TEMP_MAX_C,
+    )
     if args.advertised_ip:
         address = f"[{args.advertised_ip}]" if args.advertised_ip.version == 6 \
             else str(args.advertised_ip)

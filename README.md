@@ -138,6 +138,33 @@ synthesize a fault, so `0x0300` is reserved. A remote shutdown command places
 the model in standby/insulation-check (`0x0001`) without reporting a false
 fault. Alarm registers remain zero because fault conditions are not modeled.
 
+### Nameplate ratings and model boundaries
+
+The simulator constrains its synthetic output to the SUN2000-330KTL-H1
+nameplate limits: 275 kW active power, 330 kVA apparent power, and 238.2 A
+three-phase output current at 800 V. The reactive-power model exercises both
+0.8-leading and 0.8-lagging power-factor operation where active- and
+apparent-power limits permit. Positive PF/reactive power means lagging;
+negative means leading. While producing power, the four published PV channels
+remain within the 500–1500 V MPP range and 65 A per-input current rating.
+
+The nameplate also specifies six physical DC inputs, 1500 V maximum DC input
+voltage, 115 A short-circuit current per input, 50/60 Hz operation, ambient
+operating temperature of −25 to +60 °C, non-isolated topology, IP66 enclosure,
+protection class I, pollution degree III, and MBUS/RS485 communications. These
+are descriptive nameplate characteristics, not additional telemetry or
+safety behavior. The supplied PDF defines four PV voltage/current channels,
+not six, so the simulator implements those four and does not fabricate
+registers for the additional inputs or other unaddressed nameplate values.
+Modbus TCP is the software transport; physical MBUS/RS485 and short-circuit
+behavior are not emulated.
+
+The PDF provides no registers for AC voltage, grid frequency, ambient
+temperature, or output current. Output current is derived from modeled
+apparent power and the 800 V nameplate voltage in periodic log output only.
+The PDF's temperature register is an internal-temperature reading and is not
+the nameplate ambient operating-temperature rating.
+
 The server supports the specified read-only telemetry through both holding
 registers (FC 03) and input registers (FC 04). Access modes are enforced:
 writes to RO and unmapped holding-register addresses and reads from WO startup
@@ -150,9 +177,10 @@ access policy.
 
 Input power is calculated from modeled AC output and efficiency. Its value is
 distributed evenly across the four PV input channels; each channel's voltage
-tracks the simulated irradiance within the 500–1500 V range. This balances the
-published per-string telemetry with the aggregate DC power but is not intended
-to represent independent string mismatch or optimizer behavior.
+tracks the simulated irradiance within the 500–1500 V range, and calculated
+current remains below the 65 A per-input rating. This balances the published
+per-string telemetry with the aggregate DC power but is not intended to
+represent independent string mismatch or optimizer behavior.
 
 System-time writes update the emulator's clock offset; the register continues
 to advance on each simulation update, and model timestamps and daylight
@@ -166,13 +194,14 @@ values are stored but are not interpreted by the simplified grid model.
 - A one-second update loop models a daylight curve using local time: a
   half-sine irradiance envelope between 06:00 and 18:00, multiplied by a
   bounded random cloud factor. There is no weather service or location input.
-- Output is limited by the writable failsafe limit and the model's 275 kW
-  active-power maximum. The nameplate apparent-power ceiling is 330 kVA.
+- Output is limited by the writable failsafe limit and the nameplate's 275 kW
+  active-power, 330 kVA apparent-power, and 238.2 A output-current maxima.
 - Reactive power, power factor, efficiency, temperature, and insulation
   readings are generated as plausible synthetic telemetry, not electrical or
   thermal measurements.
 - DC input power and the four PV channel measurements are derived from the
-  modeled AC output and efficiency, and are distributed evenly across strings.
+  modeled AC output and efficiency, and are distributed evenly across the four
+  channels in the PDF register map.
 - Writing `1` to startup or shutdown is a one-shot command. Startup forces a
   minimum irradiance floor; shutdown forces power to zero until startup is
   requested. A shutdown command takes precedence over the solar model.

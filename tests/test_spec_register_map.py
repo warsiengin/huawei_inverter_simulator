@@ -1,6 +1,8 @@
 import asyncio
 import time
 import unittest
+from datetime import datetime
+from unittest.mock import patch
 
 from pymodbus.pdu.register_write_message import (
     WriteMultipleRegistersRequest,
@@ -30,8 +32,12 @@ from huawei_inverter_emulator.inverter_emulator import (
     R_PV3_VOLTAGE,
     R_PV4_CURRENT,
     R_PV4_VOLTAGE,
+    R_POWER_FACTOR,
+    R_REACTIVE_POWER,
     R_STARTUP_TIME,
     R_SYSTEM_TIME,
+    MAX_OUTPUT_CURRENT_A,
+    NOMINAL_AC_VOLTAGE_V,
     ST_ON_GRID,
     ST_STANDBY_INSULATION_CHECK,
     ST_STANDBY_INIT,
@@ -83,6 +89,63 @@ class SpecificationRegisterMapTests(unittest.TestCase):
             pv_power_kw += voltage_v * current_a / 1000
 
         self.assertAlmostEqual(pv_power_kw, dc_kw, delta=0.1)
+
+    def test_nameplate_power_current_pv_and_bidirectional_pf_limits(self):
+        noon = datetime.now().replace(
+            hour=12, minute=0, second=0, microsecond=0
+        ).timestamp()
+        self.simulator.system_time_offset = noon - time.time()
+        self.simulator.cloud = 1.0
+        self.simulator.forced_start = True
+
+        observed_pf_signs = set()
+        for reactive_sign in (-1, 1):
+            with (
+                patch(
+                    "huawei_inverter_emulator.inverter_emulator.random.uniform",
+                    side_effect=(0.0, 0.0, 0.8, 0.0, 0.0, 0.0),
+                ),
+                patch(
+                    "huawei_inverter_emulator.inverter_emulator.random.choice",
+                    return_value=reactive_sign,
+                ),
+            ):
+                self.simulator.update()
+
+            p_kw = self.simulator.rd_i32(R_ACTIVE_POWER) / 1000
+            q_kvar = self.simulator.rd_i32(R_REACTIVE_POWER) / 1000
+            power_factor = self.simulator.rd_i16(R_POWER_FACTOR) / 1000
+            apparent_power_kva = (p_kw**2 + q_kvar**2) ** 0.5
+            output_current_a = (
+                apparent_power_kva
+                * 1000
+                / (3**0.5 * NOMINAL_AC_VOLTAGE_V)
+            )
+
+            self.assertLessEqual(p_kw, 275.0)
+            self.assertLessEqual(apparent_power_kva, 330.0)
+            self.assertLessEqual(output_current_a, MAX_OUTPUT_CURRENT_A)
+            self.assertGreaterEqual(abs(power_factor), 0.8)
+            self.assertLessEqual(abs(power_factor), 1.0)
+            self.assertEqual(power_factor > 0, reactive_sign > 0)
+            observed_pf_signs.add(power_factor > 0)
+
+            for voltage_register, current_register in (
+                (R_PV1_VOLTAGE, R_PV1_CURRENT),
+                (R_PV2_VOLTAGE, R_PV2_CURRENT),
+                (R_PV3_VOLTAGE, R_PV3_CURRENT),
+                (R_PV4_VOLTAGE, R_PV4_CURRENT),
+            ):
+                self.assertLessEqual(
+                    self.simulator.rd_i16(voltage_register) / 10,
+                    1500.0,
+                )
+                self.assertLessEqual(
+                    self.simulator.rd_i16(current_register) / 100,
+                    65.0,
+                )
+
+        self.assertEqual(observed_pf_signs, {False, True})
 
     def test_standby_and_shutdown_only_publish_documented_status_values(self):
         self.simulator.forced_stop = True
